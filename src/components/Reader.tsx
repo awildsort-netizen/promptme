@@ -34,16 +34,19 @@ const MS_PER_WORD = 60000 / DEFAULT_WPM;
 const MIN_AUTO_DELAY = 400;
 
 export default function Reader({ text, onBack }: ReaderProps) {
+  const initialSettings = getTextSettings(text.id);
   const [bunches, setBunches] = useState<WordBunch[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState<Mode>('read');
   const [wpm, setWpm] = useState(DEFAULT_WPM);
-  const [poetry, setPoetry] = useState(false);
+  const [poetry, setPoetry] = useState(initialSettings.poetryMode);
   const [loading, setLoading] = useState(true);
   const [trainingIntervals, setTrainingIntervals] = useState<number[]>([]);
   const [lastTapTime, setLastTapTime] = useState<number>(0);
-  const [hasTrainedTiming, setHasTrainedTiming] = useState(false);
+  const [hasTrainedTiming, setHasTrainedTiming] = useState(
+    initialSettings.trainingRuns.length > 0
+  );
   const [showInfo, setShowInfo] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bunchRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -53,6 +56,8 @@ export default function Reader({ text, onBack }: ReaderProps) {
   const wpmRef = useRef(DEFAULT_WPM);
   const modeRef = useRef<Mode>('read');
   const textIdRef = useRef(text.id);
+  const timeoutRef = useRef<number | null>(null);
+  const scheduleNextRef = useRef<() => void>(() => {});
 
   // Keep refs in sync
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -64,16 +69,11 @@ export default function Reader({ text, onBack }: ReaderProps) {
 
   // Load content
   useEffect(() => {
-    setLoading(true);
-    const settings = getTextSettings(text.id);
-    setPoetry(settings.poetryMode);
-    setHasTrainedTiming(settings.trainingRuns.length > 0);
-
     fetch(getTextUrl(text.book, text.filename))
       .then((r) => r.text())
       .then((md) => {
-        const segments = settings.poetryMode ? parsePoetryMode(md) : parseMarkdown(md);
-        const b = splitIntoWordBunches(segments, settings.poetryMode);
+        const segments = poetry ? parsePoetryMode(md) : parseMarkdown(md);
+        const b = splitIntoWordBunches(segments);
         setBunches(b);
         bunchesRef.current = b;
         setCurrentIndex(-1);
@@ -85,7 +85,7 @@ export default function Reader({ text, onBack }: ReaderProps) {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [text]);
+  }, [poetry, text]);
 
   // Recursive auto-advance timer — completely self-scheduling
   const scheduleNext = useCallback(() => {
@@ -111,32 +111,45 @@ export default function Reader({ text, onBack }: ReaderProps) {
     }
     delay = Math.max(delay, MIN_AUTO_DELAY);
 
-    setTimeout(() => {
+    timeoutRef.current = window.setTimeout(() => {
       if (!isPlayingRef.current || modeRef.current !== 'read') return;
       const nextIdx = currentIndexRef.current + 1;
       if (nextIdx >= bunchesRef.current.length) {
         setIsPlaying(false);
         isPlayingRef.current = false;
+        timeoutRef.current = null;
         return;
       }
       setCurrentIndex(nextIdx);
       currentIndexRef.current = nextIdx;
-      scheduleNext();
+      scheduleNextRef.current();
     }, delay);
   }, []);
+
+  useEffect(() => {
+    scheduleNextRef.current = scheduleNext;
+  }, [scheduleNext]);
 
   // Start/stop the recursive timer
   useEffect(() => {
     if (isPlaying && mode === 'read') {
-      // If starting from before beginning, jump to 0 immediately
-      if (currentIndex < 0) {
-        setCurrentIndex(0);
-        currentIndexRef.current = 0;
-      }
-      scheduleNext();
+      scheduleNextRef.current();
+      return;
     }
-    // We intentionally don't stop the timer here — the timer callback checks isPlayingRef
-  }, [isPlaying, mode, scheduleNext, currentIndex]);
+
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+  }, [isPlaying, mode, currentIndex]);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
 
   // Scroll current bunch into view
   useEffect(() => {
@@ -162,20 +175,24 @@ export default function Reader({ text, onBack }: ReaderProps) {
     setPoetry(newPoetry);
     setIsPlaying(false);
     isPlayingRef.current = false;
-
-    fetch(getTextUrl(text.book, text.filename))
-      .then((r) => r.text())
-      .then((md) => {
-        const segments = newPoetry ? parsePoetryMode(md) : parseMarkdown(md);
-        const b = splitIntoWordBunches(segments, newPoetry);
-        setBunches(b);
-        bunchesRef.current = b;
-        setCurrentIndex(-1);
-        currentIndexRef.current = -1;
-        setTrainingIntervals([]);
-        setLastTapTime(0);
-      });
+    setLoading(true);
+    setCurrentIndex(-1);
+    currentIndexRef.current = -1;
+    setTrainingIntervals([]);
+    setLastTapTime(0);
   }, [text]);
+
+  const togglePlayback = useCallback(() => {
+    const next = !isPlayingRef.current;
+
+    if (next && currentIndexRef.current < 0) {
+      setCurrentIndex(0);
+      currentIndexRef.current = 0;
+    }
+
+    setIsPlaying(next);
+    isPlayingRef.current = next;
+  }, []);
 
   // Handle tap
   const handleTap = useCallback(() => {
@@ -204,13 +221,9 @@ export default function Reader({ text, onBack }: ReaderProps) {
       }
     } else {
       // Read mode: toggle play/pause
-      setIsPlaying((prev) => {
-        const next = !prev;
-        isPlayingRef.current = next;
-        return next;
-      });
+      togglePlayback();
     }
-  }, [lastTapTime, trainingIntervals]);
+  }, [lastTapTime, togglePlayback, trainingIntervals]);
 
   // Switch mode
   const switchMode = useCallback((newMode: Mode) => {
@@ -488,9 +501,7 @@ export default function Reader({ text, onBack }: ReaderProps) {
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                const next = !isPlaying;
-                setIsPlaying(next);
-                isPlayingRef.current = next;
+                togglePlayback();
               }}
               className="w-10 h-10 rounded-full bg-amber-400/10 border border-amber-400/30
                          flex items-center justify-center active:scale-90 transition-transform flex-shrink-0"

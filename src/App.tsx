@@ -24,7 +24,7 @@ function App() {
     <div className="antialiased">
       {screen === 'list' && <BookList onSelectText={handleSelectText} />}
       {screen === 'reader' && selectedText && (
-        <Reader text={selectedText} onBack={handleBack} />
+        <Reader key={selectedText.id} text={selectedText} onBack={handleBack} />
       )}
     </div>
   );

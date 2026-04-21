@@ -125,10 +125,7 @@ function splitIntoChunks(words: string[]): string[][] {
 }
 
 /** Convert segments to word bunches, with paragraph spacing tracking */
-export function splitIntoWordBunches(
-  segments: TextSegment[],
-  _poetryMode: boolean = false
-): WordBunch[] {
+export function splitIntoWordBunches(segments: TextSegment[]): WordBunch[] {
   const bunches: WordBunch[] = [];
 
   for (const seg of segments) {
