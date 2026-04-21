@@ -25,6 +25,7 @@ import {
 interface ReaderProps {
   text: BookText;
   onBack: () => void;
+  showBack?: boolean;
 }
 
 type Mode = 'read' | 'training';
@@ -33,7 +34,7 @@ const DEFAULT_WPM = 180;
 const MS_PER_WORD = 60000 / DEFAULT_WPM;
 const MIN_AUTO_DELAY = 400;
 
-export default function Reader({ text, onBack }: ReaderProps) {
+export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   const initialSettings = getTextSettings(text.id);
   const [bunches, setBunches] = useState<WordBunch[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
@@ -141,7 +142,7 @@ export default function Reader({ text, onBack }: ReaderProps) {
       window.clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
-  }, [isPlaying, mode, currentIndex]);
+  }, [isPlaying, mode]);
 
   useEffect(() => {
     return () => {
@@ -158,15 +159,21 @@ export default function Reader({ text, onBack }: ReaderProps) {
     const container = scrollRef.current;
     if (!el || !container) return;
 
-    const containerHeight = container.clientHeight;
-    const elTop = el.offsetTop;
-    const elHeight = el.offsetHeight;
-    const targetY = elTop - containerHeight / 2 + elHeight / 2;
+    const frameId = window.requestAnimationFrame(() => {
+      const containerHeight = container.clientHeight;
+      const elTop = el.offsetTop;
+      const elHeight = el.offsetHeight;
+      const targetY = elTop - containerHeight / 2 + elHeight / 2;
 
-    container.scrollTo({
-      top: Math.max(0, targetY),
-      behavior: 'smooth',
+      container.scrollTo({
+        top: Math.max(0, targetY),
+        behavior: 'smooth',
+      });
     });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
   }, [currentIndex]);
 
   // Toggle poetry mode
@@ -267,20 +274,26 @@ export default function Reader({ text, onBack }: ReaderProps) {
     );
   }
 
-  const effectiveIndex = Math.max(0, currentIndex);
-  const progress = bunches.length > 1 ? (effectiveIndex / (bunches.length - 1)) * 100 : 0;
+  const activeIndex = currentIndex >= 0 ? currentIndex : null;
+  const progress = activeIndex !== null && bunches.length > 1
+    ? (activeIndex / (bunches.length - 1)) * 100
+    : 0;
 
   return (
     <div className="h-screen bg-zinc-950 flex flex-col overflow-hidden select-none">
       {/* Top bar */}
       <div className="flex-shrink-0 flex items-center justify-between px-3 py-3 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/50 z-20">
-        <button
-          onClick={handleBack}
-          className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg active:bg-zinc-800/60 transition-colors"
-        >
-          <ArrowLeft size={18} className="text-zinc-400" />
-          <span className="text-zinc-400 text-xs font-medium">back</span>
-        </button>
+        {showBack ? (
+          <button
+            onClick={handleBack}
+            className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg active:bg-zinc-800/60 transition-colors"
+          >
+            <ArrowLeft size={18} className="text-zinc-400" />
+            <span className="text-zinc-400 text-xs font-medium">back</span>
+          </button>
+        ) : (
+          <div className="w-[60px]" />
+        )}
 
         <div className="flex-1 mx-2 text-center min-w-0">
           <h2 className="text-zinc-200 text-sm font-semibold truncate">{text.title}</h2>
@@ -394,20 +407,24 @@ export default function Reader({ text, onBack }: ReaderProps) {
         {/* Partitions */}
         <div className="px-5">
           {bunches.map((bunch, i) => {
-            const isCurrent = i === effectiveIndex;
-            const isPast = i < effectiveIndex;
-            const distance = Math.abs(i - effectiveIndex);
+            const isCurrent = activeIndex === i;
+            const isPast = activeIndex !== null && i < activeIndex;
+            const distance = activeIndex === null ? null : Math.abs(i - activeIndex);
 
             const opacity = isCurrent
               ? 1
               : isPast
               ? 0.12
+              : distance === null
+              ? 0.92
               : Math.max(0.06, 1 - distance * 0.12);
 
             const brightness = isCurrent
               ? 'brightness(110%)'
               : isPast
               ? 'brightness(35%)'
+              : distance === null
+              ? 'brightness(100%)'
               : `brightness(${Math.max(25, 100 - distance * 7)}%)`;
 
             return (
@@ -478,7 +495,7 @@ export default function Reader({ text, onBack }: ReaderProps) {
             </div>
             <div className="flex justify-between mt-1.5">
               <span className="text-zinc-500 text-[10px]">
-                {effectiveIndex + 1} / {bunches.length}
+                {activeIndex === null ? 0 : activeIndex + 1} / {bunches.length}
               </span>
               <span className="text-zinc-500 text-[10px]">
                 {mode === 'read'
@@ -487,9 +504,9 @@ export default function Reader({ text, onBack }: ReaderProps) {
                       ? 'trained pace'
                       : `${wpm} wpm`
                     : 'tap to play'
-                  : currentIndex < 0
+                  : activeIndex === null
                   ? 'tap to start'
-                  : effectiveIndex >= bunches.length - 1
+                  : activeIndex >= bunches.length - 1
                   ? 'complete!'
                   : `${trainingIntervals.length} recorded`}
               </span>

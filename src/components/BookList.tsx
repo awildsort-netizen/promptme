@@ -2,21 +2,40 @@ import { useState } from 'react';
 import type { Book, BookText } from '../data/content';
 import { BOOKS } from '../data/content';
 import { FolderOpen, Folder, ChevronRight, FileText } from 'lucide-react';
+import { cn } from '../lib/utils';
 
 interface BookListProps {
   onSelectText: (text: BookText) => void;
+  selectedTextId?: string;
+  className?: string;
+  desktopSidebar?: boolean;
 }
 
-function BookFolder({ book, onSelectText }: { book: Book; onSelectText: (t: BookText) => void }) {
-  const [isOpen, setIsOpen] = useState(false);
+interface BookFolderProps {
+  book: Book;
+  onSelectText: (text: BookText) => void;
+  selectedTextId?: string;
+  forceOpen?: boolean;
+}
+
+function BookFolder({ book, onSelectText, selectedTextId, forceOpen = false }: BookFolderProps) {
+  const containsSelectedText = book.texts.some((text) => text.id === selectedTextId);
+  const [manualOpen, setManualOpen] = useState(forceOpen || containsSelectedText);
+  const isOpen = forceOpen || containsSelectedText || manualOpen;
 
   return (
     <div className="mb-2">
       <button
-        onClick={() => setIsOpen(!isOpen)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 bg-zinc-900/80 backdrop-blur-sm 
-                   rounded-xl border border-zinc-800/60 active:scale-[0.98] transition-all duration-150
-                   hover:bg-zinc-800/80 hover:border-zinc-700/60"
+        onClick={() => {
+          if (!forceOpen) {
+            setManualOpen(!isOpen);
+          }
+        }}
+        className={cn(
+          'w-full flex items-center gap-3 px-4 py-3.5 bg-zinc-900/80 backdrop-blur-sm rounded-xl border border-zinc-800/60 transition-all duration-150 hover:bg-zinc-800/80 hover:border-zinc-700/60',
+          !forceOpen && 'active:scale-[0.98]',
+          containsSelectedText && 'border-amber-400/30 bg-zinc-900'
+        )}
       >
         <div className="flex-shrink-0 text-amber-400">
           {isOpen ? <FolderOpen size={22} /> : <Folder size={22} />}
@@ -43,13 +62,35 @@ function BookFolder({ book, onSelectText }: { book: Book; onSelectText: (t: Book
             <button
               key={text.id}
               onClick={() => onSelectText(text)}
-              className="w-full flex items-center gap-3 px-4 py-3 rounded-lg 
-                         text-left active:bg-zinc-800/60 transition-colors duration-100
-                         hover:bg-zinc-800/40"
+              className={cn(
+                'w-full flex items-center gap-3 px-4 py-3 rounded-lg text-left transition-colors duration-100 hover:bg-zinc-800/40',
+                text.id === selectedTextId
+                  ? 'bg-amber-400/10 text-amber-100 ring-1 ring-amber-400/30'
+                  : 'active:bg-zinc-800/60'
+              )}
             >
-              <FileText size={16} className="text-zinc-500 flex-shrink-0" />
-              <span className="text-zinc-300 text-sm font-medium truncate">{text.title}</span>
-              <ChevronRight size={14} className="text-zinc-600 flex-shrink-0 ml-auto" />
+              <FileText
+                size={16}
+                className={cn(
+                  'flex-shrink-0',
+                  text.id === selectedTextId ? 'text-amber-300' : 'text-zinc-500'
+                )}
+              />
+              <span
+                className={cn(
+                  'text-sm font-medium truncate',
+                  text.id === selectedTextId ? 'text-amber-100' : 'text-zinc-300'
+                )}
+              >
+                {text.title}
+              </span>
+              <ChevronRight
+                size={14}
+                className={cn(
+                  'flex-shrink-0 ml-auto',
+                  text.id === selectedTextId ? 'text-amber-300' : 'text-zinc-600'
+                )}
+              />
             </button>
           ))}
         </div>
@@ -58,11 +99,22 @@ function BookFolder({ book, onSelectText }: { book: Book; onSelectText: (t: Book
   );
 }
 
-export default function BookList({ onSelectText }: BookListProps) {
+export default function BookList({
+  onSelectText,
+  selectedTextId,
+  className,
+  desktopSidebar = false,
+}: BookListProps) {
   const totalTexts = BOOKS.reduce((sum, b) => sum + b.texts.length, 0);
 
   return (
-    <div className="min-h-screen bg-zinc-950">
+    <div
+      className={cn(
+        'bg-zinc-950',
+        desktopSidebar ? 'h-full overflow-y-auto border-r border-zinc-800/50' : 'min-h-screen',
+        className
+      )}
+    >
       {/* Header */}
       <div className="sticky top-0 z-10 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/50">
         <div className="px-4 py-4">
@@ -72,9 +124,15 @@ export default function BookList({ onSelectText }: BookListProps) {
       </div>
 
       {/* Book folders */}
-      <div className="px-3 py-3 pb-24">
+      <div className={cn('px-3 py-3', desktopSidebar ? 'pb-8' : 'pb-24')}>
         {BOOKS.map((book) => (
-          <BookFolder key={book.key} book={book} onSelectText={onSelectText} />
+          <BookFolder
+            key={book.key}
+            book={book}
+            onSelectText={onSelectText}
+            selectedTextId={selectedTextId}
+            forceOpen={desktopSidebar}
+          />
         ))}
 
         {/* Footer */}
