@@ -1,0 +1,70 @@
+/* Custom styles for mkdirbook reader */
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: #09090b;
+  color: #e4e4e7;
+  overscroll-behavior-y: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+/* Hide scrollbar but keep functionality */
+::-webkit-scrollbar {
+  width: 0px;
+  background: transparent;
+}
+
+/* Range input styling */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: #27272a;
+  border-radius: 2px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: #fbbf24;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid #18181b;
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: #fbbf24;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid #18181b;
+}
+
+/* Animation for folder open/close */
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Selection color */
+::selection {
+  background: rgba(251, 191, 36, 0.3);
+  color: #fef3c7;
+}
