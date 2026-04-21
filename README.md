@@ -6,6 +6,12 @@ A lightweight reading interface for browsing and opening the `mkdirbook` texts f
 
 ```bash
 npm install
+make dev
+```
+
+Or run Vite directly:
+
+```bash
 npm run dev
 ```
 
