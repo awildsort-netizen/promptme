@@ -15,25 +15,19 @@ interface BookFolderProps {
   book: Book;
   onSelectText: (text: BookText) => void;
   selectedTextId?: string;
-  forceOpen?: boolean;
 }
 
-function BookFolder({ book, onSelectText, selectedTextId, forceOpen = false }: BookFolderProps) {
+function BookFolder({ book, onSelectText, selectedTextId }: BookFolderProps) {
   const containsSelectedText = book.texts.some((text) => text.id === selectedTextId);
-  const [manualOpen, setManualOpen] = useState(forceOpen || containsSelectedText);
-  const isOpen = forceOpen || containsSelectedText || manualOpen;
+  const [isOpen, setIsOpen] = useState(containsSelectedText);
 
   return (
     <div className="mb-2">
       <button
-        onClick={() => {
-          if (!forceOpen) {
-            setManualOpen(!isOpen);
-          }
-        }}
+        onClick={() => setIsOpen((open) => !open)}
         className={cn(
           'w-full flex items-center gap-3 px-4 py-3.5 bg-zinc-900/80 backdrop-blur-sm rounded-xl border border-zinc-800/60 transition-all duration-150 hover:bg-zinc-800/80 hover:border-zinc-700/60',
-          !forceOpen && 'active:scale-[0.98]',
+          'active:scale-[0.98]',
           containsSelectedText && 'border-amber-400/30 bg-zinc-900'
         )}
       >
@@ -127,11 +121,10 @@ export default function BookList({
       <div className={cn('px-3 py-3', desktopSidebar ? 'pb-8' : 'pb-24')}>
         {BOOKS.map((book) => (
           <BookFolder
-            key={book.key}
+            key={`${book.key}:${selectedTextId ?? 'none'}`}
             book={book}
             onSelectText={onSelectText}
             selectedTextId={selectedTextId}
-            forceOpen={desktopSidebar}
           />
         ))}
 

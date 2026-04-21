@@ -38,6 +38,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   const initialSettings = getTextSettings(text.id);
   const [bunches, setBunches] = useState<WordBunch[]>([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
+  const [scrollIndex, setScrollIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState<Mode>('read');
   const [wpm, setWpm] = useState(DEFAULT_WPM);
@@ -53,16 +54,19 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   const bunchRefs = useRef<(HTMLDivElement | null)[]>([]);
   const isPlayingRef = useRef(false);
   const currentIndexRef = useRef(-1);
+  const scrollIndexRef = useRef(-1);
   const bunchesRef = useRef<WordBunch[]>([]);
   const wpmRef = useRef(DEFAULT_WPM);
   const modeRef = useRef<Mode>('read');
   const textIdRef = useRef(text.id);
   const timeoutRef = useRef<number | null>(null);
   const scheduleNextRef = useRef<() => void>(() => {});
+  const scrollSyncFrameRef = useRef<number | null>(null);
 
   // Keep refs in sync
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
+  useEffect(() => { scrollIndexRef.current = scrollIndex; }, [scrollIndex]);
   useEffect(() => { bunchesRef.current = bunches; }, [bunches]);
   useEffect(() => { wpmRef.current = wpm; }, [wpm]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
@@ -79,6 +83,8 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
         bunchesRef.current = b;
         setCurrentIndex(-1);
         currentIndexRef.current = -1;
+        setScrollIndex(-1);
+        scrollIndexRef.current = -1;
         setIsPlaying(false);
         isPlayingRef.current = false;
         setTrainingIntervals([]);
@@ -123,6 +129,8 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
       }
       setCurrentIndex(nextIdx);
       currentIndexRef.current = nextIdx;
+      setScrollIndex(nextIdx);
+      scrollIndexRef.current = nextIdx;
       scheduleNextRef.current();
     }, delay);
   }, []);
@@ -149,8 +157,61 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
       if (timeoutRef.current !== null) {
         window.clearTimeout(timeoutRef.current);
       }
+      if (scrollSyncFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollSyncFrameRef.current);
+      }
     };
   }, []);
+
+  const syncScrollIndexToScrollPosition = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container || modeRef.current !== 'read' || isPlayingRef.current) return;
+
+    const containerRect = container.getBoundingClientRect();
+    const containerCenter = containerRect.top + containerRect.height / 2;
+    let closestIndex = -1;
+    let closestDistance = Number.POSITIVE_INFINITY;
+
+    bunchRefs.current.forEach((el, index) => {
+      if (!el) return;
+
+      const rect = el.getBoundingClientRect();
+      const elementCenter = rect.top + rect.height / 2;
+      const distance = Math.abs(elementCenter - containerCenter);
+
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = index;
+      }
+    });
+
+    if (closestIndex >= 0) {
+      setScrollIndex((prev) => (prev === closestIndex ? prev : closestIndex));
+    }
+  }, []);
+
+  const handleReaderScroll = useCallback(() => {
+    if (scrollSyncFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollSyncFrameRef.current);
+    }
+
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      syncScrollIndexToScrollPosition();
+    });
+  }, [syncScrollIndexToScrollPosition]);
+
+  useEffect(() => {
+    if (mode !== 'read' || bunches.length === 0) return;
+
+    const frameId = window.requestAnimationFrame(() => {
+      syncScrollIndexToScrollPosition();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [bunches, mode, syncScrollIndexToScrollPosition, text.id]);
 
   // Scroll current bunch into view
   useEffect(() => {
@@ -185,6 +246,8 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     setLoading(true);
     setCurrentIndex(-1);
     currentIndexRef.current = -1;
+    setScrollIndex(-1);
+    scrollIndexRef.current = -1;
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, [text]);
@@ -192,9 +255,14 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   const togglePlayback = useCallback(() => {
     const next = !isPlayingRef.current;
 
-    if (next && currentIndexRef.current < 0) {
-      setCurrentIndex(0);
-      currentIndexRef.current = 0;
+    if (next) {
+      const visibleIndex = scrollIndexRef.current >= 0 ? scrollIndexRef.current : 0;
+      const lastIndex = bunchesRef.current.length - 1;
+      const startIndex = visibleIndex >= lastIndex ? 0 : visibleIndex;
+      setCurrentIndex(startIndex);
+      currentIndexRef.current = startIndex;
+      setScrollIndex(startIndex);
+      scrollIndexRef.current = startIndex;
     }
 
     setIsPlaying(next);
@@ -240,6 +308,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     modeRef.current = newMode;
     setCurrentIndex(-1);
     currentIndexRef.current = -1;
+    setScrollIndex(-1);
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, []);
@@ -249,6 +318,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     e.stopPropagation();
     setCurrentIndex(-1);
     currentIndexRef.current = -1;
+    setScrollIndex(-1);
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, []);
@@ -274,7 +344,9 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     );
   }
 
-  const activeIndex = currentIndex >= 0 ? currentIndex : null;
+  const activeIndex = mode === 'read'
+    ? ((isPlaying ? currentIndex : scrollIndex) >= 0 ? (isPlaying ? currentIndex : scrollIndex) : null)
+    : (currentIndex >= 0 ? currentIndex : null);
   const progress = activeIndex !== null && bunches.length > 1
     ? (activeIndex / (bunches.length - 1)) * 100
     : 0;
@@ -400,6 +472,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
         ref={scrollRef}
         className="flex-1 overflow-y-auto overscroll-none"
         onClick={handleTap}
+        onScroll={handleReaderScroll}
       >
         {/* Top spacer */}
         <div className="h-[40vh]" />
