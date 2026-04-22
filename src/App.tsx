@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import BookList from './components/BookList';
 import Reader from './components/Reader';
 import type { BookText } from './data/content';
+import { useCatalog } from './hooks/useCatalog';
 import './App.css';
 
 type Screen = 'list' | 'reader';
@@ -12,29 +13,23 @@ function App() {
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
   const [isFullscreen, setIsFullscreen] = useState(() => Boolean(document.fullscreenElement));
 
+  const { books, loading: catalogLoading, error: catalogError } = useCatalog();
+
   useEffect(() => {
     const mediaQuery = window.matchMedia('(min-width: 1024px)');
     const handleChange = (event: MediaQueryListEvent) => {
       setIsDesktop(event.matches);
     };
-
     mediaQuery.addEventListener('change', handleChange);
-
-    return () => {
-      mediaQuery.removeEventListener('change', handleChange);
-    };
+    return () => mediaQuery.removeEventListener('change', handleChange);
   }, []);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
     };
-
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-    };
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
   const handleSelectText = useCallback((text: BookText) => {
@@ -53,6 +48,9 @@ function App() {
         {!isFullscreen && (
           <aside className="hidden lg:block w-[320px] xl:w-[360px] shrink-0">
             <BookList
+              books={books}
+              catalogLoading={catalogLoading}
+              catalogError={catalogError}
               onSelectText={handleSelectText}
               selectedTextId={selectedText?.id}
               desktopSidebar
@@ -86,7 +84,14 @@ function App() {
 
   return (
     <div className="antialiased">
-      {screen === 'list' && <BookList onSelectText={handleSelectText} />}
+      {screen === 'list' && (
+        <BookList
+          books={books}
+          catalogLoading={catalogLoading}
+          catalogError={catalogError}
+          onSelectText={handleSelectText}
+        />
+      )}
       {screen === 'reader' && selectedText && (
         <Reader key={selectedText.id} text={selectedText} onBack={handleBack} showBack />
       )}

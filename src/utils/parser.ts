@@ -7,8 +7,24 @@ export interface TextSegment {
 export interface WordBunch {
   type: 'header' | 'words';
   level?: number;
-  text: string;
-  words: string[];
+  text: string;      // raw text (may contain markdown inline syntax)
+  html: string;      // rendered HTML for display
+  words: string[];   // plain words for timing/count
+}
+
+// ---------------------------------------------------------------------------
+// Inline markdown renderer — handles **bold**, *italic*, _italic_, --/em-dash
+// ---------------------------------------------------------------------------
+export function renderInlineMarkdown(text: string): string {
+  return text
+    // em-dash shorthand: -- → —
+    .replace(/--/g, '—')
+    // bold: **text** or __text__
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    // italic: *text* or _text_  (must come after bold)
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>');
 }
 
 /** Parse markdown into segments, merging consecutive non-empty lines into paragraphs */
@@ -21,10 +37,7 @@ export function parseMarkdown(content: string): TextSegment[] {
     const stripped = line.trim();
     if (!stripped) {
       if (currentParagraph.length > 0) {
-        segments.push({
-          type: 'line',
-          text: currentParagraph.join(' ')
-        });
+        segments.push({ type: 'line', text: currentParagraph.join(' ') });
         currentParagraph = [];
       }
       continue;
@@ -32,29 +45,19 @@ export function parseMarkdown(content: string): TextSegment[] {
 
     if (stripped.startsWith('#')) {
       if (currentParagraph.length > 0) {
-        segments.push({
-          type: 'line',
-          text: currentParagraph.join(' ')
-        });
+        segments.push({ type: 'line', text: currentParagraph.join(' ') });
         currentParagraph = [];
       }
       const level = stripped.length - stripped.replace(/^#+/, '').length;
       const headerText = stripped.replace(/^#+\s*/, '').trim();
-      segments.push({
-        type: 'header',
-        level: Math.min(level, 3),
-        text: headerText
-      });
+      segments.push({ type: 'header', level: Math.min(level, 3), text: headerText });
     } else {
       currentParagraph.push(stripped);
     }
   }
 
   if (currentParagraph.length > 0) {
-    segments.push({
-      type: 'line',
-      text: currentParagraph.join(' ')
-    });
+    segments.push({ type: 'line', text: currentParagraph.join(' ') });
   }
 
   return segments;
@@ -67,24 +70,14 @@ export function parsePoetryMode(content: string): TextSegment[] {
 
   for (const line of lines) {
     const stripped = line.trim();
-    if (!stripped) {
-      // Blank line = paragraph break, represented as empty line segment
-      continue;
-    }
+    if (!stripped) continue;
 
     if (stripped.startsWith('#')) {
       const level = stripped.length - stripped.replace(/^#+/, '').length;
       const headerText = stripped.replace(/^#+\s*/, '').trim();
-      segments.push({
-        type: 'header',
-        level: Math.min(level, 3),
-        text: headerText
-      });
+      segments.push({ type: 'header', level: Math.min(level, 3), text: headerText });
     } else {
-      segments.push({
-        type: 'line',
-        text: stripped
-      });
+      segments.push({ type: 'line', text: stripped });
     }
   }
 
@@ -92,8 +85,8 @@ export function parsePoetryMode(content: string): TextSegment[] {
 }
 
 /** Target bunch size for splitting */
-const TARGET_MIN = 5;
-const TARGET_MAX = 12;
+const TARGET_MIN = 8;
+const TARGET_MAX = 15;
 
 function splitIntoChunks(words: string[]): string[][] {
   if (words.length === 0) return [];
@@ -104,11 +97,6 @@ function splitIntoChunks(words: string[]): string[][] {
 
   while (remaining.length > 0) {
     if (remaining.length <= TARGET_MAX) {
-      chunks.push(remaining);
-      break;
-    }
-
-    if (remaining.length >= TARGET_MIN && remaining.length <= TARGET_MAX) {
       chunks.push(remaining);
       break;
     }
@@ -124,8 +112,22 @@ function splitIntoChunks(words: string[]): string[][] {
   return chunks;
 }
 
-/** Convert segments to word bunches, with paragraph spacing tracking */
-export function splitIntoWordBunches(segments: TextSegment[]): WordBunch[] {
+// Strip markdown syntax to get plain words for timing purposes
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/__(.+?)__/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1')
+    .replace(/_(.+?)_/g, '$1')
+    .replace(/--/g, '—');
+}
+
+/**
+ * Convert segments to word bunches, with inline markdown preserved in html field.
+ * In poetry mode, each segment is kept as a single bunch regardless of length.
+ * In prose mode, long segments are split into TARGET_MIN–TARGET_MAX word chunks.
+ */
+export function splitIntoWordBunches(segments: TextSegment[], poetryMode = false): WordBunch[] {
   const bunches: WordBunch[] = [];
 
   for (const seg of segments) {
@@ -134,21 +136,39 @@ export function splitIntoWordBunches(segments: TextSegment[]): WordBunch[] {
         type: 'header',
         level: seg.level || 1,
         text: seg.text,
-        words: [seg.text]
+        html: renderInlineMarkdown(seg.text),
+        words: [seg.text],
       });
       continue;
     }
 
-    const words = seg.text.split(/\s+/).filter(w => w.length > 0);
-    const chunks = splitIntoChunks(words);
+    const plainText = stripMarkdown(seg.text);
+    const plainWords = plainText.split(/\s+/).filter(w => w.length > 0);
+    const originalWords = seg.text.split(/\s+/).filter(w => w.length > 0);
 
-    for (let ci = 0; ci < chunks.length; ci++) {
-      const chunk = chunks[ci];
+    if (poetryMode) {
+      // Keep the entire line as one bunch — never split poetry lines
       bunches.push({
         type: 'words',
-        text: chunk.join(' '),
-        words: chunk
+        text: seg.text,
+        html: renderInlineMarkdown(seg.text),
+        words: plainWords,
       });
+    } else {
+      // Prose: split long segments into TARGET_MIN–TARGET_MAX word chunks
+      const chunks = splitIntoChunks(plainWords);
+      let wordOffset = 0;
+      for (const chunk of chunks) {
+        const originalChunk = originalWords.slice(wordOffset, wordOffset + chunk.length);
+        const rawText = originalChunk.join(' ');
+        bunches.push({
+          type: 'words',
+          text: rawText,
+          html: renderInlineMarkdown(rawText),
+          words: chunk,
+        });
+        wordOffset += chunk.length;
+      }
     }
   }
 

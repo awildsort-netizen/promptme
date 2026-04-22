@@ -30,15 +30,20 @@ interface ReaderProps {
 
 type Mode = 'read' | 'training';
 
-const DEFAULT_WPM = 180;
+const DEFAULT_WPM = 140;
 const MS_PER_WORD = 60000 / DEFAULT_WPM;
 const MIN_AUTO_DELAY = 400;
+// How long to suppress scroll-sync after a programmatic smooth scroll (ms)
+const AUTO_SCROLL_SUPPRESS_MS = 700;
 
 export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   const initialSettings = getTextSettings(text.id);
   const [bunches, setBunches] = useState<WordBunch[]>([]);
-  const [currentIndex, setCurrentIndex] = useState(-1);
-  const [scrollIndex, setScrollIndex] = useState(-1);
+
+  // FIX 5: Single activeIndex replaces the dual currentIndex/scrollIndex design.
+  // -1 = nothing active yet.
+  const [activeIndex, setActiveIndex] = useState(-1);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [mode, setMode] = useState<Mode>('read');
   const [wpm, setWpm] = useState(DEFAULT_WPM);
@@ -50,23 +55,37 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     initialSettings.trainingRuns.length > 0
   );
   const [showInfo, setShowInfo] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const bunchRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  // Refs that mirror state for use inside callbacks/timers without stale closures
   const isPlayingRef = useRef(false);
-  const currentIndexRef = useRef(-1);
-  const scrollIndexRef = useRef(-1);
+  const activeIndexRef = useRef(-1);
   const bunchesRef = useRef<WordBunch[]>([]);
   const wpmRef = useRef(DEFAULT_WPM);
   const modeRef = useRef<Mode>('read');
   const textIdRef = useRef(text.id);
+
+  // Timer ref
   const timeoutRef = useRef<number | null>(null);
+  // Stable ref to scheduleNext so the timer callback can call it without capturing a stale closure
   const scheduleNextRef = useRef<() => void>(() => {});
+  // rAF ref for scroll debounce
   const scrollSyncFrameRef = useRef<number | null>(null);
 
-  // Keep refs in sync
+  // FIX 2: Guard that suppresses scroll-sync while a programmatic smooth scroll is in flight,
+  // preventing the feedback loop where auto-scroll fires onScroll → re-syncs index → re-schedules.
+  const isAutoScrollingRef = useRef(false);
+  const autoScrollSuppressTimerRef = useRef<number | null>(null);
+
+  // FIX 1: Flag that marks whether the most recent activeIndex change was timer-driven.
+  // The scroll-into-view effect only fires when this is true.
+  const scrollCausedByTimerRef = useRef(false);
+
+  // Keep refs in sync with state
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
-  useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
-  useEffect(() => { scrollIndexRef.current = scrollIndex; }, [scrollIndex]);
+  useEffect(() => { activeIndexRef.current = activeIndex; }, [activeIndex]);
   useEffect(() => { bunchesRef.current = bunches; }, [bunches]);
   useEffect(() => { wpmRef.current = wpm; }, [wpm]);
   useEffect(() => { modeRef.current = mode; }, [mode]);
@@ -74,17 +93,16 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
 
   // Load content
   useEffect(() => {
+    setLoading(true);
     fetch(getTextUrl(text.book, text.filename))
       .then((r) => r.text())
       .then((md) => {
         const segments = poetry ? parsePoetryMode(md) : parseMarkdown(md);
-        const b = splitIntoWordBunches(segments);
+        const b = splitIntoWordBunches(segments, poetry);
         setBunches(b);
         bunchesRef.current = b;
-        setCurrentIndex(-1);
-        currentIndexRef.current = -1;
-        setScrollIndex(-1);
-        scrollIndexRef.current = -1;
+        setActiveIndex(-1);
+        activeIndexRef.current = -1;
         setIsPlaying(false);
         isPlayingRef.current = false;
         setTrainingIntervals([]);
@@ -94,11 +112,18 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
       .catch(() => setLoading(false));
   }, [poetry, text]);
 
-  // Recursive auto-advance timer — completely self-scheduling
+  // FIX 3 + FIX 4: scheduleNext clears any existing timer before setting a new one,
+  // and captures the index it was scheduled from so stale timer fires can be discarded.
   const scheduleNext = useCallback(() => {
     if (!isPlayingRef.current || modeRef.current !== 'read') return;
 
-    const idx = currentIndexRef.current;
+    // FIX 3: Always clear before scheduling to prevent duplicate timers
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
+    }
+
+    const idx = activeIndexRef.current;
     const all = bunchesRef.current;
     if (idx >= all.length - 1) {
       setIsPlaying(false);
@@ -106,7 +131,6 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
       return;
     }
 
-    // Compute delay for the CURRENT bunch (the one we're about to leave)
     const trained = getAveragedTimings(textIdRef.current);
     let delay: number;
     if (trained && idx >= 0 && idx < trained.length) {
@@ -118,54 +142,63 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
     }
     delay = Math.max(delay, MIN_AUTO_DELAY);
 
+    // FIX 4: Capture the index this timer was scheduled from
+    const scheduledFromIndex = idx;
+
     timeoutRef.current = window.setTimeout(() => {
+      timeoutRef.current = null;
       if (!isPlayingRef.current || modeRef.current !== 'read') return;
-      const nextIdx = currentIndexRef.current + 1;
+
+      // FIX 4: Discard stale timer if the user scrolled away since this was scheduled
+      if (activeIndexRef.current !== scheduledFromIndex) {
+        scheduleNextRef.current();
+        return;
+      }
+
+      const nextIdx = activeIndexRef.current + 1;
       if (nextIdx >= bunchesRef.current.length) {
         setIsPlaying(false);
         isPlayingRef.current = false;
-        timeoutRef.current = null;
         return;
       }
-      setCurrentIndex(nextIdx);
-      currentIndexRef.current = nextIdx;
-      setScrollIndex(nextIdx);
-      scrollIndexRef.current = nextIdx;
+
+      // FIX 1: Mark this as a timer-driven change so scroll-into-view fires
+      scrollCausedByTimerRef.current = true;
+      setActiveIndex(nextIdx);
+      activeIndexRef.current = nextIdx;
       scheduleNextRef.current();
     }, delay);
   }, []);
 
-  useEffect(() => {
-    scheduleNextRef.current = scheduleNext;
-  }, [scheduleNext]);
+  useEffect(() => { scheduleNextRef.current = scheduleNext; }, [scheduleNext]);
 
-  // Start/stop the recursive timer
   useEffect(() => {
     if (isPlaying && mode === 'read') {
       scheduleNextRef.current();
       return;
     }
-
     if (timeoutRef.current !== null) {
       window.clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
   }, [isPlaying, mode]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (timeoutRef.current !== null) {
-        window.clearTimeout(timeoutRef.current);
-      }
-      if (scrollSyncFrameRef.current !== null) {
-        window.cancelAnimationFrame(scrollSyncFrameRef.current);
-      }
+      if (timeoutRef.current !== null) window.clearTimeout(timeoutRef.current);
+      if (scrollSyncFrameRef.current !== null) window.cancelAnimationFrame(scrollSyncFrameRef.current);
+      if (autoScrollSuppressTimerRef.current !== null) window.clearTimeout(autoScrollSuppressTimerRef.current);
     };
   }, []);
 
-  const syncScrollIndexToScrollPosition = useCallback(() => {
+  // Sync scroll position → activeIndex (when not playing, or when user scrolls while playing)
+  const syncScrollToActiveIndex = useCallback(() => {
     const container = scrollRef.current;
-    if (!container || modeRef.current !== 'read' || isPlayingRef.current) return;
+    if (!container || modeRef.current !== 'read') return;
+
+    // FIX 2: Ignore scroll events that we triggered ourselves
+    if (isAutoScrollingRef.current) return;
 
     const containerRect = container.getBoundingClientRect();
     const containerCenter = containerRect.top + containerRect.height / 2;
@@ -174,156 +207,151 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
 
     bunchRefs.current.forEach((el, index) => {
       if (!el) return;
-
       const rect = el.getBoundingClientRect();
       const elementCenter = rect.top + rect.height / 2;
       const distance = Math.abs(elementCenter - containerCenter);
-
       if (distance < closestDistance) {
         closestDistance = distance;
         closestIndex = index;
       }
     });
 
-    if (closestIndex >= 0) {
-      setScrollIndex((prev) => (prev === closestIndex ? prev : closestIndex));
+    if (closestIndex < 0 || closestIndex === activeIndexRef.current) return;
+
+    // User-driven scroll: update index without triggering auto-scroll back
+    scrollCausedByTimerRef.current = false;
+    setActiveIndex(closestIndex);
+    activeIndexRef.current = closestIndex;
+
+    // If playing, cancel the pending timer and restart from the new position
+    if (isPlayingRef.current) {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+      scheduleNextRef.current();
     }
   }, []);
 
   const handleReaderScroll = useCallback(() => {
-    if (scrollSyncFrameRef.current !== null) {
-      window.cancelAnimationFrame(scrollSyncFrameRef.current);
-    }
-
+    if (scrollSyncFrameRef.current !== null) window.cancelAnimationFrame(scrollSyncFrameRef.current);
     scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
       scrollSyncFrameRef.current = null;
-      syncScrollIndexToScrollPosition();
+      syncScrollToActiveIndex();
     });
-  }, [syncScrollIndexToScrollPosition]);
+  }, [syncScrollToActiveIndex]);
 
+  // Initial scroll sync after content loads or mode changes
   useEffect(() => {
     if (mode !== 'read' || bunches.length === 0) return;
+    const frameId = window.requestAnimationFrame(() => syncScrollToActiveIndex());
+    return () => window.cancelAnimationFrame(frameId);
+  }, [bunches, mode, syncScrollToActiveIndex, text.id]);
 
-    const frameId = window.requestAnimationFrame(() => {
-      syncScrollIndexToScrollPosition();
-    });
-
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [bunches, mode, syncScrollIndexToScrollPosition, text.id]);
-
-  // Scroll current bunch into view
+  // FIX 1: Scroll the active bunch into view ONLY when the change was timer-driven
   useEffect(() => {
-    if (currentIndex < 0) return;
-    const el = bunchRefs.current[currentIndex];
+    if (activeIndex < 0) return;
+    if (!scrollCausedByTimerRef.current) return;
+    scrollCausedByTimerRef.current = false;
+
+    const el = bunchRefs.current[activeIndex];
     const container = scrollRef.current;
     if (!el || !container) return;
+
+    // FIX 2: Mark that we're auto-scrolling so the scroll handler ignores these events
+    if (autoScrollSuppressTimerRef.current !== null) {
+      window.clearTimeout(autoScrollSuppressTimerRef.current);
+    }
+    isAutoScrollingRef.current = true;
+    autoScrollSuppressTimerRef.current = window.setTimeout(() => {
+      isAutoScrollingRef.current = false;
+      autoScrollSuppressTimerRef.current = null;
+    }, AUTO_SCROLL_SUPPRESS_MS);
 
     const frameId = window.requestAnimationFrame(() => {
       const containerHeight = container.clientHeight;
       const elTop = el.offsetTop;
       const elHeight = el.offsetHeight;
       const targetY = elTop - containerHeight / 2 + elHeight / 2;
-
-      container.scrollTo({
-        top: Math.max(0, targetY),
-        behavior: 'smooth',
-      });
+      container.scrollTo({ top: Math.max(0, targetY), behavior: 'smooth' });
     });
 
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [currentIndex]);
+    return () => window.cancelAnimationFrame(frameId);
+  }, [activeIndex]);
 
-  // Toggle poetry mode
   const handleTogglePoetry = useCallback(() => {
     const newPoetry = togglePoetryMode(text.id);
     setPoetry(newPoetry);
     setIsPlaying(false);
     isPlayingRef.current = false;
     setLoading(true);
-    setCurrentIndex(-1);
-    currentIndexRef.current = -1;
-    setScrollIndex(-1);
-    scrollIndexRef.current = -1;
+    setActiveIndex(-1);
+    activeIndexRef.current = -1;
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, [text]);
 
   const togglePlayback = useCallback(() => {
     const next = !isPlayingRef.current;
-
     if (next) {
-      const visibleIndex = scrollIndexRef.current >= 0 ? scrollIndexRef.current : 0;
+      const current = activeIndexRef.current;
       const lastIndex = bunchesRef.current.length - 1;
-      const startIndex = visibleIndex >= lastIndex ? 0 : visibleIndex;
-      setCurrentIndex(startIndex);
-      currentIndexRef.current = startIndex;
-      setScrollIndex(startIndex);
-      scrollIndexRef.current = startIndex;
+      const startIndex = current < 0 || current >= lastIndex ? 0 : current;
+      scrollCausedByTimerRef.current = true;
+      setActiveIndex(startIndex);
+      activeIndexRef.current = startIndex;
     }
-
     setIsPlaying(next);
     isPlayingRef.current = next;
   }, []);
 
-  // Handle tap
   const handleTap = useCallback(() => {
     if (modeRef.current === 'training') {
       const now = Date.now();
-
-      if (currentIndexRef.current < 0) {
+      if (activeIndexRef.current < 0) {
         setLastTapTime(now);
-        setCurrentIndex(0);
-        currentIndexRef.current = 0;
+        scrollCausedByTimerRef.current = true;
+        setActiveIndex(0);
+        activeIndexRef.current = 0;
         return;
       }
-
       const interval = now - lastTapTime;
       const newIntervals = [...trainingIntervals, interval];
       setTrainingIntervals(newIntervals);
       setLastTapTime(now);
-
-      const next = currentIndexRef.current + 1;
+      const next = activeIndexRef.current + 1;
       if (next < bunchesRef.current.length) {
-        setCurrentIndex(next);
-        currentIndexRef.current = next;
+        scrollCausedByTimerRef.current = true;
+        setActiveIndex(next);
+        activeIndexRef.current = next;
       } else {
         addTrainingRun(textIdRef.current, newIntervals);
         setHasTrainedTiming(true);
       }
     } else {
-      // Read mode: toggle play/pause
       togglePlayback();
     }
   }, [lastTapTime, togglePlayback, trainingIntervals]);
 
-  // Switch mode
   const switchMode = useCallback((newMode: Mode) => {
     setIsPlaying(false);
     isPlayingRef.current = false;
     setMode(newMode);
     modeRef.current = newMode;
-    setCurrentIndex(-1);
-    currentIndexRef.current = -1;
-    setScrollIndex(-1);
+    setActiveIndex(-1);
+    activeIndexRef.current = -1;
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, []);
 
-  // Restart training
   const restartTraining = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
-    setCurrentIndex(-1);
-    currentIndexRef.current = -1;
-    setScrollIndex(-1);
+    setActiveIndex(-1);
+    activeIndexRef.current = -1;
     setTrainingIntervals([]);
     setLastTapTime(0);
   }, []);
 
-  // Clear training
   const handleClearTraining = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
     clearTrainingData(text.id);
@@ -339,16 +367,19 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
   if (loading) {
     return (
       <div className="h-screen bg-zinc-950 flex items-center justify-center">
-        <div className="text-zinc-500 text-sm animate-pulse">loading...</div>
+        <div className="flex gap-1.5 items-center">
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400/60 animate-bounce [animation-delay:0ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400/60 animate-bounce [animation-delay:150ms]" />
+          <span className="w-1.5 h-1.5 rounded-full bg-amber-400/60 animate-bounce [animation-delay:300ms]" />
+        </div>
       </div>
     );
   }
 
-  const activeIndex = mode === 'read'
-    ? ((isPlaying ? currentIndex : scrollIndex) >= 0 ? (isPlaying ? currentIndex : scrollIndex) : null)
-    : (currentIndex >= 0 ? currentIndex : null);
-  const progress = activeIndex !== null && bunches.length > 1
-    ? (activeIndex / (bunches.length - 1)) * 100
+  // FIX 5: Single activeIndex drives all rendering — no more dual-index logic
+  const displayIndex = activeIndex >= 0 ? activeIndex : null;
+  const progress = displayIndex !== null && bunches.length > 1
+    ? (displayIndex / (bunches.length - 1)) * 100
     : 0;
 
   return (
@@ -393,15 +424,19 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
             {mode === 'training' ? (
               <RotateCcw size={16} />
             ) : (
-              <ChevronRight size={16} className={`transition-transform ${showInfo ? 'rotate-90' : ''}`} />
+              <ChevronRight size={16} className={`transition-transform duration-200 ${showInfo ? 'rotate-90' : ''}`} />
             )}
           </button>
         </div>
       </div>
 
       {/* Info panel */}
-      {showInfo && (
-        <div className="flex-shrink-0 bg-zinc-900/90 backdrop-blur-md border-b border-zinc-800/50 px-4 py-3 z-10 space-y-2">
+      <div
+        className={`flex-shrink-0 overflow-hidden transition-all duration-300 ease-in-out ${
+          showInfo ? 'max-h-40 opacity-100' : 'max-h-0 opacity-0'
+        }`}
+      >
+        <div className="bg-zinc-900/90 backdrop-blur-md border-b border-zinc-800/50 px-4 py-3 space-y-2">
           {mode === 'read' && (
             <>
               <div className="flex items-center justify-between">
@@ -436,13 +471,13 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
             </button>
           )}
         </div>
-      )}
+      </div>
 
       {/* Mode tabs */}
       <div className="flex-shrink-0 flex bg-zinc-900/50 border-b border-zinc-800/30">
         <button
           onClick={() => switchMode('read')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all duration-200 ${
             mode === 'read'
               ? 'text-amber-400 border-b-2 border-amber-400 bg-zinc-800/30'
               : 'text-zinc-500 border-b-2 border-transparent'
@@ -456,7 +491,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
         </button>
         <button
           onClick={() => switchMode('training')}
-          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all ${
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-all duration-200 ${
             mode === 'training'
               ? 'text-amber-400 border-b-2 border-amber-400 bg-zinc-800/30'
               : 'text-zinc-500 border-b-2 border-transparent'
@@ -477,12 +512,11 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
         {/* Top spacer */}
         <div className="h-[40vh]" />
 
-        {/* Partitions */}
         <div className="px-5">
           {bunches.map((bunch, i) => {
-            const isCurrent = activeIndex === i;
-            const isPast = activeIndex !== null && i < activeIndex;
-            const distance = activeIndex === null ? null : Math.abs(i - activeIndex);
+            const isCurrent = displayIndex === i;
+            const isPast = displayIndex !== null && i < displayIndex;
+            const distance = displayIndex === null ? null : Math.abs(i - displayIndex);
 
             const opacity = isCurrent
               ? 1
@@ -493,7 +527,7 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
               : Math.max(0.06, 1 - distance * 0.12);
 
             const brightness = isCurrent
-              ? 'brightness(110%)'
+              ? 'brightness(115%)'
               : isPast
               ? 'brightness(35%)'
               : distance === null
@@ -504,42 +538,46 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
               <div
                 key={i}
                 ref={(el) => { bunchRefs.current[i] = el; }}
-                className={`transition-all duration-300 ease-out ${
-                  isCurrent ? 'scale-[1.04]' : ''
-                }`}
+                className="transition-all duration-500 ease-out"
                 style={{
                   opacity,
                   filter: brightness,
+                  transform: isCurrent ? 'scale(1.04)' : 'scale(1)',
                   marginBottom: bunch.type === 'header' ? '1.5rem' : '0.25rem',
+                  transitionProperty: 'opacity, filter, transform',
+                  transitionTimingFunction: isCurrent
+                    ? 'cubic-bezier(0.34, 1.56, 0.64, 1)'
+                    : 'cubic-bezier(0.4, 0, 0.2, 1)',
+                  transitionDuration: isCurrent ? '400ms' : '500ms',
                 }}
               >
                 <div
-                  className={`py-5 px-4 rounded-xl transition-colors duration-300 ${
-                    isCurrent ? 'bg-zinc-800/40' : 'bg-transparent'
-                  }`}
+                  className="py-5 px-4 rounded-xl transition-colors duration-400"
+                  style={{
+                    backgroundColor: isCurrent ? 'rgba(39,39,42,0.4)' : 'transparent',
+                    transition: 'background-color 400ms ease',
+                  }}
                 >
                   {bunch.type === 'header' ? (
                     <h3
-                      className={`font-bold text-zinc-100 text-center ${
+                      className={`bunch-text font-bold text-zinc-100 text-center ${
                         bunch.level === 1
                           ? 'text-xl'
                           : bunch.level === 2
                           ? 'text-lg'
                           : 'text-base'
                       }`}
-                    >
-                      {bunch.text}
-                    </h3>
+                      dangerouslySetInnerHTML={{ __html: bunch.html }}
+                    />
                   ) : (
                     <p
-                      className={`text-center leading-relaxed ${
+                      className={`bunch-text text-center leading-relaxed transition-all duration-400 ${
                         isCurrent
-                          ? 'text-[18px] font-semibold text-amber-100'
+                          ? 'bunch-active text-[18px] font-semibold text-amber-100'
                           : 'text-[16px] text-zinc-300'
                       }`}
-                    >
-                      {bunch.text}
-                    </p>
+                      dangerouslySetInnerHTML={{ __html: bunch.html }}
+                    />
                   )}
                 </div>
 
@@ -562,13 +600,16 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
           <div className="flex-1 min-w-0">
             <div className="h-1 bg-zinc-800 rounded-full overflow-hidden">
               <div
-                className="h-full bg-amber-400/80 rounded-full transition-all duration-300"
-                style={{ width: `${progress}%` }}
+                className="h-full bg-amber-400/80 rounded-full"
+                style={{
+                  width: `${progress}%`,
+                  transition: 'width 400ms cubic-bezier(0.4, 0, 0.2, 1)',
+                }}
               />
             </div>
             <div className="flex justify-between mt-1.5">
               <span className="text-zinc-500 text-[10px]">
-                {activeIndex === null ? 0 : activeIndex + 1} / {bunches.length}
+                {displayIndex === null ? 0 : displayIndex + 1} / {bunches.length}
               </span>
               <span className="text-zinc-500 text-[10px]">
                 {mode === 'read'
@@ -577,9 +618,9 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
                       ? 'trained pace'
                       : `${wpm} wpm`
                     : 'tap to play'
-                  : activeIndex === null
+                  : displayIndex === null
                   ? 'tap to start'
-                  : activeIndex >= bunches.length - 1
+                  : displayIndex >= bunches.length - 1
                   ? 'complete!'
                   : `${trainingIntervals.length} recorded`}
               </span>
@@ -589,12 +630,9 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
           {/* Action button */}
           {mode === 'read' ? (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                togglePlayback();
-              }}
+              onClick={(e) => { e.stopPropagation(); togglePlayback(); }}
               className="w-10 h-10 rounded-full bg-amber-400/10 border border-amber-400/30
-                         flex items-center justify-center active:scale-90 transition-transform flex-shrink-0"
+                         flex items-center justify-center active:scale-90 transition-transform duration-150 flex-shrink-0"
             >
               {isPlaying ? (
                 <Pause size={16} className="text-amber-400" />
@@ -604,12 +642,9 @@ export default function Reader({ text, onBack, showBack = true }: ReaderProps) {
             </button>
           ) : (
             <button
-              onClick={(e) => {
-                e.stopPropagation();
-                restartTraining(e);
-              }}
+              onClick={(e) => { e.stopPropagation(); restartTraining(e); }}
               className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700
-                         flex items-center justify-center active:scale-90 transition-transform flex-shrink-0"
+                         flex items-center justify-center active:scale-90 transition-transform duration-150 flex-shrink-0"
             >
               <RotateCcw size={16} className="text-zinc-400" />
             </button>
